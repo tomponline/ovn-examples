@@ -5,13 +5,22 @@
 # ./dhcp_multi_tenant.sh test_net2
 # sudo ip netns exec test_net1_p1 ping 10.0.0.12
 
-set -e
-
 tenant_net_name="${1}"
-tenant_subnet="10.0.0.0/24"
+tenant_subnet_ipv4="10.0.0.0/24"
+tenant_subnet_ipv6="fd47:8ac3:9083:35f6::/64"
 tenant_reserved_ips="10.0.0.1..10.0.0.10"
-tenant_router_ip="10.0.0.1"
-tenant_dhcp_mac="c0:ff:ee:00:00:01"
+tenant_router_ipv4="10.0.0.1"
+tenant_router_ipv4_subnet="10.0.0.1/24"
+tenant_router_ipv6_subnet="fd47:8ac3:9083:35f6::1/64"
+tenant_router_mac="c0:ff:ee:00:00:00"
+
+if [ "${tenant_net_name}" == "" ]; then
+	echo "Please specify net name"
+	exit 1
+fi
+
+set -e
+set -o xtrace
 
 # Configure OVN database to accept connections from OVS chassis.
 sudo ovn-sbctl set-connection ptcp:6642:127.0.0.1
@@ -24,8 +33,9 @@ sudo ovn-nbctl --if-exists ls-del "${tenant_net_name}"
 
 sudo ovn-nbctl ls-add "${tenant_net_name}" -- \
 	set logical_switch "${tenant_net_name}" \
-		other_config:subnet="${tenant_subnet=}" \
-		other_config:exclude_ips="${tenant_reserved_ips=}"
+		other_config:subnet="${tenant_subnet_ipv4}" \
+		other_config:ipv6_prefix="${tenant_subnet_ipv6}" \
+		other_config:exclude_ips="${tenant_reserved_ips}"
 
 # Create DHCP settings for network.
 sudo ovn-nbctl destroy dhcp_options \
@@ -33,12 +43,32 @@ sudo ovn-nbctl destroy dhcp_options \
 		external_ids:lxd_network="${tenant_net_name}")
 
 dhcp_opts_uuid=$(sudo ovn-nbctl create dhcp_option \
-	external_ids:lxd_network="${tenant_net_name=}" \
-	cidr="${tenant_subnet=}" \
-	options:server_id="${tenant_router_ip}" \
+	external_ids:lxd_network="${tenant_net_name}" \
+	cidr="${tenant_subnet_ipv4}" \
+	options:server_id="${tenant_router_ipv4}" \
 	options:lease_time="3600" \
-	options:router="${tenant_router_ip}" \
-	options:server_mac="${tenant_dhcp_mac}")
+	options:router="${tenant_router_ipv4}" \
+	options:server_mac="${tenant_router_mac}")
+
+# Setup router.
+routerName="${tenant_net_name}_router"
+routerPort="${tenant_net_name}_gw"
+sudo ovn-nbctl --if-exists lr-del "${routerName}"
+sudo ovn-nbctl lr-add "${routerName}"
+sudo ovn-nbctl lrp-add "${routerName}" "${routerPort}" "${tenant_router_mac}" "${tenant_router_ipv4_subnet}" "${tenant_router_ipv6_subnet}" -- \
+	set logical_router_port "${routerPort}" \
+		ipv6_ra_configs:send_periodic=true \
+		ipv6_ra_configs:address_mode=slaac \
+		ipv6_ra_configs:min_interval=10 \
+		ipv6_ra_configs:max_interval=15
+
+# Setup router port on switch.
+routerSwitchPort="${routerPort}_sw" # This has to be different than $routerPort.
+sudo ovn-nbctl --if-exists lsp-del "${routerPort}"
+sudo ovn-nbctl lsp-add "${tenant_net_name}" "${routerSwitchPort}" -- \
+	lsp-set-type "${routerSwitchPort}" router -- \
+	lsp-set-addresses "${routerSwitchPort}" router -- \
+	lsp-set-options "${routerSwitchPort}" router-port="${routerPort}"
 
 # Print summary of logical network and DHCP options.
 echo -e "\nCreated logical network ${tenant_net_name}:"
