@@ -1,9 +1,10 @@
 #!/bin/bash
 
 # Usage: Create two networks with same subnet and MACs.
+# ./dhcp_multi_tenant.sh {ID}
 # ./dhcp_multi_tenant.sh 1
 # ./dhcp_multi_tenant.sh 2
-# sudo ip netns exec test_net1_p1 ping 10.0.0.12
+# sudo ip netns exec test_net{ID}_p1 ping 10.0.0.12
 
 tenant_net_id="${1}"
 tenant_net_name="test_net${tenant_net_id}"
@@ -118,6 +119,15 @@ sudo ovn-nbctl -- --id=@nat create nat type="snat" \
 
 # IPv6 SNAT.
 # TODO as current OVN doesn't support SNAT.
+
+# Add local DNS entries for router to internal switch.
+sudo ovn-nbctl destroy dns \
+        $(sudo ovn-nbctl --format=csv --no-headings --data=bare --columns=_uuid find dns \
+                external_ids:lxd_network="${tenant_net_name}")
+
+sudo ovn-nbctl -- --id=@dns create dns records="gateway.localdomain=${tenant_router_ipv4}" \
+	external_ids:lxd_network="${tenant_net_name}" -- \
+	add logical_switch "${tenant_net_name}" dns_records @dns
 
 # Create router port for external access.
 externalRouterPort="${tenant_net_name}_ext_gw"
