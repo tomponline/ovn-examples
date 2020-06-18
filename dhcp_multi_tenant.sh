@@ -1,11 +1,12 @@
 #!/bin/bash
 
 # Usage: Create two networks with same subnet and MACs.
-# ./dhcp_multi_tenant.sh test_net1
-# ./dhcp_multi_tenant.sh test_net2
+# ./dhcp_multi_tenant.sh 2
+# ./dhcp_multi_tenant.sh 3
 # sudo ip netns exec test_net1_p1 ping 10.0.0.12
 
-tenant_net_name="${1}"
+tenant_net_id="${1}"
+tenant_net_name="test_net${tenant_net_id}"
 tenant_subnet_ipv4="10.0.0.0/24"
 tenant_subnet_ipv6="fd47:8ac3:9083:35f6::/64"
 tenant_reserved_ips="10.0.0.1..10.0.0.10"
@@ -13,9 +14,14 @@ tenant_router_ipv4="10.0.0.1"
 tenant_router_ipv4_subnet="10.0.0.1/24"
 tenant_router_ipv6_subnet="fd47:8ac3:9083:35f6::1/64"
 tenant_router_mac="c0:ff:ee:00:00:00"
+tenant_router_ext_ipv4="192.168.3.${tenant_net_id}"
+tenant_router_ext_mac="02:0a:7f:00:01:29"
+ext_net_name="lxd_ext"
+ext_net_ip="192.168.3.1"
+ext_net_mac="02:0a:7f:00:01:30"
 
-if [ "${tenant_net_name}" == "" ]; then
-	echo "Please specify net name"
+if [ "${tenant_net_id}" == "" ]; then
+	echo "Please specify net ID"
 	exit 1
 fi
 
@@ -27,6 +33,24 @@ sudo ovn-sbctl set-connection ptcp:6642:127.0.0.1
 
 echo "OVN database listener setup:"
 sudo ovn-sbctl get-connection
+
+# Create shared external switch for external network access.
+sudo ovn-nbctl --may-exist ls-add "${ext_net_name}"
+
+# Create logical switch port for external port on external switch.
+sudo ovn-nbctl --if-exists lsp-del "${ext_net_name}"
+sudo ovn-nbctl lsp-add "${ext_net_name}" "${ext_net_name}" -- \
+	lsp-set-addresses "${ext_net_name}" "${ext_net_mac} ${ext_net_ip}"
+
+sudo ovs-vsctl --may-exist add-port br-int "${ext_net_name}" -- \
+	set interface "${ext_net_name}" \
+	type=internal \
+	mac='["'"${ext_net_mac=}"'"]' \
+	external_ids:iface-id="${ext_net_name}"
+
+# Bring up interface on LXD host.
+sudo ip a replace "${ext_net_ip}"/24 dev "${ext_net_name}"
+sudo ip link set "${ext_net_name}" up
 
 # Create logical switch with subnet and reserved IPs.
 sudo ovn-nbctl --if-exists ls-del "${tenant_net_name}"
@@ -64,6 +88,9 @@ sudo ovn-nbctl lrp-add "${routerName}" "${routerPort}" "${tenant_router_mac}" "$
 		ipv6_ra_configs:min_interval=10 \
 		ipv6_ra_configs:max_interval=15
 
+# Add default route on router to shared external host interface.
+sudo ovn-nbctl lr-route-add "${routerName}" 0.0.0.0/0 "${ext_net_ip}"
+
 # Setup router port on switch.
 routerSwitchPort="${routerPort}_sw" # This has to be different than $routerPort.
 sudo ovn-nbctl --if-exists lsp-del "${routerSwitchPort}"
@@ -72,35 +99,7 @@ sudo ovn-nbctl lsp-add "${tenant_net_name}" "${routerSwitchPort}" -- \
 	lsp-set-addresses "${routerSwitchPort}" router -- \
 	lsp-set-options "${routerSwitchPort}" router-port="${routerPort}"
 
-# Create external switch for external network access.
-externalNetName="${tenant_net_name}_ext"
-sudo ovn-nbctl --if-exists ls-del "${externalNetName}"
-sudo ovn-nbctl ls-add "${externalNetName}"
-
-# Create router port for external access.
-externalRouterPort="${tenant_net_name}_ext_gw"
-sudo ovn-nbctl --if-exists lrp-del "${externalRouterPort}"
-sudo ovn-nbctl lrp-add "${routerName}" "${externalRouterPort}" 02:0a:7f:00:01:29 192.168.3.1/24
-
-# Create logical switch port for router on external switch.
-externalRouterSwitchPort="${routerPort}_ext_sw" # This has to be different than $externalRouterPort.
-sudo ovn-nbctl --if-exists lsp-del "${externalRouterSwitchPort}"
-sudo ovn-nbctl lsp-add "${externalNetName}" "${externalRouterSwitchPort}" -- \
-        lsp-set-type "${externalRouterSwitchPort}" router -- \
-        lsp-set-addresses "${externalRouterSwitchPort}" router -- \
-        lsp-set-options "${externalRouterSwitchPort}" router-port="${externalRouterPort}"
-
-# Create logical switch port for external port on external switch.
-externalSwitchPort="${routerPort}_ext_out"
-sudo ovn-nbctl --if-exists lsp-del "${externalSwitchPort}"
-sudo ovn-nbctl lsp-add "${externalNetName}" "${externalSwitchPort}" -- \
-	lsp-set-type "${externalSwitchPort}" localnet -- \
-	lsp-set-addresses "${externalSwitchPort}" unknown -- \
-	lsp-set-options "${externalSwitchPort}" network_name=dataNet
-
-sudo ovs-vsctl set Open_vSwitch . external-ids:ovn-bridge-mappings=dataNet:"${externalNetName}"
-
-# Setup SNAT.
+# Setup SNAT on router.
 sudo ovn-nbctl destroy nat \
         $(sudo ovn-nbctl --format=csv --no-headings --data=bare --columns=_uuid find nat \
                 external_ids:lxd_network="${tenant_net_name}")
@@ -108,14 +107,21 @@ sudo ovn-nbctl destroy nat \
 sudo ovn-nbctl -- --id=@nat create nat type="snat" \
 	external_ids:lxd_network="${tenant_net_name}" \
 	logical_ip="${tenant_subnet_ipv4}" \
-	external_ip=192.168.3.1 -- \
+	external_ip="${tenant_router_ext_ipv4}" -- \
 	add logical_router "${routerName}" nat @nat
 
-# Create host bridge for external access.
-sudo ovs-vsctl --if-exists del-br "${externalNetName}"
-sudo ovs-vsctl add-br "${externalNetName}"
-sudo ip a add 192.168.3.2/24 dev "${externalNetName}"
-sudo ip link set "${externalNetName}" up
+# Create router port for external access.
+externalRouterPort="${tenant_net_name}_ext_gw"
+sudo ovn-nbctl --if-exists lrp-del "${externalRouterPort}"
+sudo ovn-nbctl lrp-add "${routerName}" "${externalRouterPort}" "${tenant_router_ext_mac}" "${tenant_router_ext_ipv4}"/24
+
+# Create logical switch port for router on external switch.
+externalRouterSwitchPort="${routerPort}_ext_sw" # This has to be different than $externalRouterPort.
+sudo ovn-nbctl --if-exists lsp-del "${externalRouterSwitchPort}"
+sudo ovn-nbctl lsp-add "${ext_net_name}" "${externalRouterSwitchPort}" -- \
+        lsp-set-type "${externalRouterSwitchPort}" router -- \
+        lsp-set-addresses "${externalRouterSwitchPort}" router -- \
+        lsp-set-options "${externalRouterSwitchPort}" router-port="${externalRouterPort}"
 
 # Print summary of logical network and DHCP options.
 echo -e "\nCreated logical network ${tenant_net_name}:"
@@ -132,7 +138,7 @@ sudo ovs-vsctl set open_vswitch . \
 	external_ids:ovn-encap-type="geneve" \
 	external_ids:system-id="$(hostname)"
 
-echo -e "\nConnected local OVS chassis to OVN database:" 
+echo -e "\nConnected local OVS chassis to OVN database:"
 sudo ovn-sbctl show
 sudo ovs-vsctl --columns external_ids list open_vswitch .
 
@@ -160,7 +166,7 @@ addPort () {
 		external_ids:iface-id="${portName}"
 
 	echo -e "\nOVS switch port added to local integration bridge:"
-	sudo ovs-vsctl show 
+	sudo ovs-vsctl show
 }
 
 movePort () {
