@@ -18,6 +18,8 @@ tenant_router_mac="c0:ff:ee:00:00:00"
 tenant_router_ext_ipv4="169.254.0.${tenant_net_id}"
 tenant_router_ext_ipv6="fd47:8ac3:9083:35f7::1:${tenant_net_id}"
 tenant_router_ext_mac="02:0a:7f:00:01:0${tenant_net_id}"
+tenant_dns_v4="8.8.8.8"
+tenant_dns_v6="2001:4860:4860::8888"
 ext_net_name="lxd_ext"
 ext_net_ipv4="169.254.0.254"
 ext_net_ipv6="fd47:8ac3:9083:35f7::1"
@@ -77,7 +79,15 @@ dhcp_opts_uuid=$(sudo ovn-nbctl create dhcp_option \
 	options:server_id="${tenant_router_ipv4}" \
 	options:lease_time="3600" \
 	options:router="${tenant_router_ipv4}" \
-	options:server_mac="${tenant_router_mac}")
+	options:server_mac="${tenant_router_mac}" \
+	options:dns_server="${tenant_dns_v4}")
+
+dhcpv6_opts_uuid=$(sudo ovn-nbctl create dhcp_option \
+	external_ids:lxd_network="${tenant_net_name}" \
+	options:server_id="${tenant_router_mac}" \
+	cidr='"'"${tenant_subnet_ipv6}"'"' \
+	options:dns_server="${tenant_dns_v6}" \
+	)
 
 # Setup router.
 routerName="${tenant_net_name}_router"
@@ -89,9 +99,10 @@ sudo ovn-nbctl lr-add "${routerName}" -- \
 sudo ovn-nbctl lrp-add "${routerName}" "${routerPort}" "${tenant_router_mac}" "${tenant_router_ipv4_subnet}" "${tenant_router_ipv6_subnet}" -- \
 	set logical_router_port "${routerPort}" \
 		ipv6_ra_configs:send_periodic=true \
-		ipv6_ra_configs:address_mode=slaac \
+		ipv6_ra_configs:address_mode=dhcpv6_stateless \
 		ipv6_ra_configs:min_interval=10 \
-		ipv6_ra_configs:max_interval=15
+		ipv6_ra_configs:max_interval=15 \
+		ipv6_ra_configs:rdnss="${tenant_dns_v6}"
 
 # Add default route on router to shared external host interface.
 sudo ovn-nbctl lr-route-add "${routerName}" 0.0.0.0/0 "${ext_net_ipv4}" -- \
@@ -146,6 +157,8 @@ sudo ovn-nbctl lsp-add "${ext_net_name}" "${externalRouterSwitchPort}" -- \
 echo -e "\nCreated logical network ${tenant_net_name}:"
 sudo ovn-nbctl show "${tenant_net_name}"
 sudo ovn-nbctl list dhcp_options "${dhcp_opts_uuid}"
+sudo ovn-nbctl list dhcp_options "${dhcpv6_opts_uuid}"
+
 
 # Connect local machine OVS to local OVN database.
 # The "." record seems to be a way to specify the first record in this table,
@@ -169,7 +182,8 @@ addPort () {
 	sudo ovn-nbctl --if-exists lsp-del "${portName}"
 	sudo ovn-nbctl lsp-add "${tenant_net_name}" "${portName}" -- \
 		lsp-set-addresses "${portName}" "${mac} dynamic" -- \
-		lsp-set-dhcpv4-options "${portName}" "${dhcp_opts_uuid}"
+		lsp-set-dhcpv4-options "${portName}" "${dhcp_opts_uuid}" -- \
+		lsp-set-dhcpv6-options "${portName}" "${dhcpv6_opts_uuid}"
 
 	# Print summary of logical switch and ports.
 	echo -e "\nLogical switch port added:"
@@ -199,7 +213,7 @@ movePort () {
 	sudo ip -n "${netnsName}" addr add 127.0.0.1/8 dev lo
 	sudo ip -n "${netnsName}" link set lo up
 	sudo ip link set netns "${netnsName}" "${portName}"
-	sudo ip netns exec "${netnsName}" dhclient -v -i "${portName}" --no-pid
+	sudo ip netns exec "${netnsName}" udhcpc -q -n -i "${portName}"
 	sudo ip netns exec "${netnsName}" ip a show "${portName}"
 	echo -e "Moved ${portName} to ${netnsName}"
 }
