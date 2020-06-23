@@ -7,7 +7,7 @@
 # sudo ip netns exec test_net{ID}_p1 ping 10.0.0.12
 
 tenant_net_id="${1}"
-tenant_net_name="test_net${tenant_net_id}"
+tenant_net_name="test-net${tenant_net_id}"
 tenant_subnet_ipv4="10.0.0.0/24"
 tenant_subnet_ipv6="fd47:8ac3:9083:35f6::/64"
 tenant_reserved_ips="10.0.0.1..10.0.0.10"
@@ -20,7 +20,7 @@ tenant_router_ext_ipv6="fd47:8ac3:9083:35f7::1:${tenant_net_id}"
 tenant_router_ext_mac="02:0a:7f:00:01:0${tenant_net_id}"
 tenant_dns_v4="8.8.8.8"
 tenant_dns_v6="2001:4860:4860::8888"
-ext_net_name="lxd_ext"
+ext_net_name="lxd-ext"
 ext_net_ipv4="169.254.0.254"
 ext_net_ipv6="fd47:8ac3:9083:35f7::1"
 ext_net_mac="02:0a:7f:00:02:30"
@@ -80,14 +80,19 @@ dhcp_opts_uuid=$(sudo ovn-nbctl create dhcp_option \
 	options:lease_time="3600" \
 	options:router="${tenant_router_ipv4}" \
 	options:server_mac="${tenant_router_mac}" \
-	options:dns_server="${tenant_dns_v4}")
+	options:dns_server="${tenant_dns_v4}" \
+	)
+
+#	options:domain_name=linuxcontainers.org \
 
 dhcpv6_opts_uuid=$(sudo ovn-nbctl create dhcp_option \
 	external_ids:lxd_network="${tenant_net_name}" \
-	options:server_id="${tenant_router_mac}" \
 	cidr='"'"${tenant_subnet_ipv6}"'"' \
+	options:server_id="${tenant_router_mac}" \
 	options:dns_server="${tenant_dns_v6}" \
 	)
+
+# 	options:domain_search=linuxcontainers.org \
 
 # Setup router.
 routerName="${tenant_net_name}_router"
@@ -99,7 +104,7 @@ sudo ovn-nbctl lr-add "${routerName}" -- \
 sudo ovn-nbctl lrp-add "${routerName}" "${routerPort}" "${tenant_router_mac}" "${tenant_router_ipv4_subnet}" "${tenant_router_ipv6_subnet}" -- \
 	set logical_router_port "${routerPort}" \
 		ipv6_ra_configs:send_periodic=true \
-		ipv6_ra_configs:address_mode=dhcpv6_stateless \
+		ipv6_ra_configs:address_mode=dhcpv6_stateful \
 		ipv6_ra_configs:min_interval=10 \
 		ipv6_ra_configs:max_interval=15 \
 		ipv6_ra_configs:rdnss="${tenant_dns_v6}"
@@ -177,7 +182,7 @@ sudo ovs-vsctl --columns external_ids list open_vswitch .
 addPort () {
 	# Add port to logical switch in OVN and configure port with DHCP options.
 	# Port names are globally unique and used to link OVN to OVS, so include network name in port name.
-	portName="${tenant_net_name}_${1}"
+	portName="${tenant_net_name}-${1}"
 	mac="${2}"
 	sudo ovn-nbctl --if-exists lsp-del "${portName}"
 	sudo ovn-nbctl lsp-add "${tenant_net_name}" "${portName}" -- \
@@ -189,14 +194,18 @@ addPort () {
 	echo -e "\nLogical switch port added:"
 	sudo ovn-nbctl show "${tenant_net_name}"
 
-	# Add port to local OVS integration bridge.
-	# Use "internal" type port so it can be moved into network namespace and used like a tap device.
+	# Create veth pair.
+	set +e
+	ip link del "${portName}"
+	set -e
+	sudo ip link add "${portName}" type veth peer name "${portName}-p"
+	sudo ip link set "${portName}-p" address "${mac}"
+	sudo ip link set "${portName}" up
+
+	# Add veth port to integration bridge.
 	sudo ovs-vsctl --if-exists del-port "${portName}"
 	sudo ovs-vsctl add-port br-int "${portName}" -- \
-		set interface "${portName}" \
-		type=internal \
-		mac='["'"${mac}"'"]' \
-		external_ids:iface-id="${portName}"
+		set interface "${portName}" external_ids:iface-id="${portName}"
 
 	echo -e "\nOVS switch port added to local integration bridge:"
 	sudo ovs-vsctl show
@@ -204,22 +213,27 @@ addPort () {
 
 movePort () {
 	# Move OVS switch port into network namespace to test.
-	portName="${tenant_net_name}_${1}"
-	netnsName="${portName}"
+	portName="${tenant_net_name}-${1}-p"
+	#netnsName="${portName}"
 	set +e
-	sudo ip netns del "${netnsName}"
+	lxc delete -f "${portName}"
 	set -e
-	sudo ip netns add "${netnsName}"
-	sudo ip -n "${netnsName}" addr add 127.0.0.1/8 dev lo
-	sudo ip -n "${netnsName}" link set lo up
-	sudo ip link set netns "${netnsName}" "${portName}"
-	sudo ip netns exec "${netnsName}" udhcpc -q -n -i "${portName}"
-	sudo ip netns exec "${netnsName}" ip a show "${portName}"
-	echo -e "Moved ${portName} to ${netnsName}"
+	lxc init images:ubuntu/focal "${portName}"
+	lxc config device add "${portName}" eth0 nic nictype=physical name=eth0 parent="${portName}"
+	lxc start "${portName}"
+	#sudo ip netns del "${netnsName}"
+	#sudo ip netns add "${netnsName}"
+	#sudo ip -n "${netnsName}" addr add 127.0.0.1/8 dev lo
+	#sudo ip -n "${netnsName}" link set lo up
+	#sudo ip link set netns "${netnsName}" "${portName}"
+	#sudo ip netns exec "${netnsName}" udhcpc -q -n -i "${portName}"
+	#sudo ip netns exec "${netnsName}" ip a show "${portName}"
+	#echo -e "Moved ${portName} to ${netnsName}"
 }
 
 addPort "p1" "c0:ff:ee:00:00:01"
 movePort "p1"
 
-addPort "p2" "c0:ff:ee:00:00:02"
-movePort "p2"
+#addPort "p2" "c0:ff:ee:00:00:02"
+#movePort "p2"
+
