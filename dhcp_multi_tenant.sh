@@ -20,6 +20,8 @@ tenant_router_ext_ipv6="fd47:8ac3:9083:35f7::1:${tenant_net_id}"
 tenant_router_ext_mac="02:0a:7f:00:01:0${tenant_net_id}"
 tenant_dns_v4="8.8.8.8"
 tenant_dns_v6="2001:4860:4860::8888"
+tenant_domain_name="lxd"
+tenant_domain_search="lxd.localdomain,linuxcontainers.org"
 ext_net_name="lxd-ext"
 ext_net_ipv4="169.254.0.254"
 ext_net_ipv6="fd47:8ac3:9083:35f7::1"
@@ -76,23 +78,29 @@ sudo ovn-nbctl destroy dhcp_options \
 dhcp_opts_uuid=$(sudo ovn-nbctl create dhcp_option \
 	external_ids:lxd_network="${tenant_net_name}" \
 	cidr="${tenant_subnet_ipv4}" \
-	options:server_id="${tenant_router_ipv4}" \
-	options:lease_time="3600" \
-	options:router="${tenant_router_ipv4}" \
-	options:server_mac="${tenant_router_mac}" \
-	options:dns_server="${tenant_dns_v4}" \
 	)
 
-#	options:domain_name=linuxcontainers.org \
+# We have to use dhcp-options-set-options rather than the command above as its the only way to allow the
+# domain_name option to be properly escaped.
+sudo ovn-nbctl dhcp-options-set-options "${dhcp_opts_uuid}" \
+	server_id="${tenant_router_ipv4}" \
+	lease_time="3600" \
+	router="${tenant_router_ipv4}" \
+	server_mac="${tenant_router_mac}" \
+	dns_server="${tenant_dns_v4}" \
+	domain_name='"'"${tenant_domain_name}"'"'
 
 dhcpv6_opts_uuid=$(sudo ovn-nbctl create dhcp_option \
 	external_ids:lxd_network="${tenant_net_name}" \
 	cidr='"'"${tenant_subnet_ipv6}"'"' \
-	options:server_id="${tenant_router_mac}" \
-	options:dns_server="${tenant_dns_v6}" \
 	)
 
-# 	options:domain_search=linuxcontainers.org \
+# We have to use dhcp-options-set-options rather than the command above as its the only way to allow the
+# domain_search option to be properly escaped.
+sudo ovn-nbctl dhcp-options-set-options "${dhcpv6_opts_uuid}" \
+	server_id="${tenant_router_mac}" \
+	dns_server="${tenant_dns_v6}" \
+	domain_search='"'"${tenant_domain_name}"'"'
 
 # Setup router.
 routerName="${tenant_net_name}_router"
@@ -107,7 +115,8 @@ sudo ovn-nbctl lrp-add "${routerName}" "${routerPort}" "${tenant_router_mac}" "$
 		ipv6_ra_configs:address_mode=dhcpv6_stateful \
 		ipv6_ra_configs:min_interval=10 \
 		ipv6_ra_configs:max_interval=15 \
-		ipv6_ra_configs:rdnss="${tenant_dns_v6}"
+		ipv6_ra_configs:rdnss="${tenant_dns_v6}" \
+		ipv6_ra_configs:dnssl="${tenant_domain_search}"
 
 # Add default route on router to shared external host interface.
 sudo ovn-nbctl lr-route-add "${routerName}" 0.0.0.0/0 "${ext_net_ipv4}" -- \
@@ -234,6 +243,6 @@ movePort () {
 addPort "p1" "c0:ff:ee:00:00:01"
 movePort "p1"
 
-#addPort "p2" "c0:ff:ee:00:00:02"
-#movePort "p2"
+addPort "p2" "c0:ff:ee:00:00:02"
+movePort "p2"
 
