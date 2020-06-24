@@ -8,11 +8,17 @@ import (
 	"log"
 	"math/big"
 	"math/rand"
+	"net"
 	"os"
 	"strings"
 
 	"github.com/lxc/lxd/shared"
 )
+
+type network struct {
+	name string
+	gw   string
+}
 
 func main() {
 	chassisName, err := os.Hostname()
@@ -25,7 +31,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	projects := []string{"project1"}
+	projects := []string{"project1", "project2"}
 	for _, projectName := range projects {
 		extHostName, err := createProjectExternalNamespace(projectName)
 		if err != nil {
@@ -33,11 +39,11 @@ func main() {
 		}
 		log.Printf("Created external host veth interface %q linked to netns %q", extHostName, projectName)
 
-		extRouterPortName, intRouterPortName, intRouterPortMAC, err := createProjectRouter(chassisName, projectName)
+		extRouterPortName, err := createProjectRouter(chassisName, projectName)
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("Created project router %q and ports (%q/%q) for chassis %q", projectName, intRouterPortName, extRouterPortName, chassisName)
+		log.Printf("Created project router %q and external port %q for chassis %q", projectName, extRouterPortName, chassisName)
 
 		externalSwitchName, err := createProjectExternalSwitch(projectName, extRouterPortName)
 		if err != nil {
@@ -45,27 +51,38 @@ func main() {
 		}
 		log.Printf("Created project external switch %q and linked external port %q to it", externalSwitchName, extRouterPortName)
 
-		networks := []string{"net1"}
-		for _, networkName := range networks {
-			internalSwitchName, DHCPv4Opt, err := createProjectInternalSwitch(projectName, intRouterPortName, intRouterPortMAC, networkName)
+		networks := []network{
+			network{
+				name: "net1",
+				gw:   "10.0.0.1/24",
+			},
+			network{
+				name: "net2",
+				gw:   "192.168.3.1/24",
+			},
+		}
+
+		for _, network := range networks {
+			internalSwitchName, DHCPv4Opt, err := createProjectInternalSwitch(projectName, network)
 			if err != nil {
 				log.Fatal(err)
 			}
-			log.Printf("Created project internal switch %q (DHCP %q) and linked router port %q to it", internalSwitchName, DHCPv4Opt, intRouterPortName)
+			log.Printf("Created project internal switch %q (DHCP %q) and connected router to it", internalSwitchName, DHCPv4Opt)
 
 			instances := []string{"c1", "c2"}
 			for _, instance := range instances {
-				instPortName, instPortMac, err := addInstancePort(projectName, internalSwitchName, instance, DHCPv4Opt)
+				instanceName := fmt.Sprintf("%s-%s", network.name, instance)
+				instPortName, instPortMac, err := addInstancePort(projectName, internalSwitchName, instanceName, DHCPv4Opt)
 				if err != nil {
 					log.Fatal(err)
 				}
 				log.Printf("Created instance port %q (%q)", instPortName, instPortMac)
 
-				err = createInstance(projectName, instance, instPortName)
+				err = createInstance(projectName, instanceName, instPortName)
 				if err != nil {
 					log.Fatal(err)
 				}
-				log.Printf("Created instance %q using port %q", instance, instPortName)
+				log.Printf("Created instance %q using port %q", instanceName, instPortName)
 			}
 		}
 	}
@@ -186,47 +203,39 @@ func createProjectExternalNamespace(projectName string) (string, error) {
 }
 
 // createProjectRouter creates a project logical router and internal/external logical router ports, returns the
-// name of the external and internal router ports created, and the internal port MAC address.
-func createProjectRouter(chassisName string, projectName string) (string, string, string, error) {
+// name of the external interface.
+func createProjectRouter(chassisName string, projectName string) (string, error) {
 	shared.RunCommand("ovn-nbctl", "--if-exists", "lr-del", projectName)
 	_, err := shared.RunCommand("ovn-nbctl", "lr-add", projectName)
 	if err != nil {
-		return "", "", "", err
+		return "", err
 	}
 
 	_, err = shared.RunCommand("ovn-nbctl", "set", "logical_router", projectName, fmt.Sprintf("options:chassis=%s", chassisName))
 	if err != nil {
-		return "", "", "", err
+		return "", err
 	}
 
 	// Create external router port.
 	externalPortName := fmt.Sprintf("%s-lrp-ext", projectName)
 	externalPortMAC, err := networkRandomMAC()
 	if err != nil {
-		return "", "", "", err
+		return "", err
 	}
 
 	shared.RunCommand("ovn-nbctl", "--if-exists", "lrp-del", externalPortName)
 	_, err = shared.RunCommand("ovn-nbctl", "lrp-add", projectName, externalPortName, externalPortMAC, "169.254.1.2/30")
 	if err != nil {
-		return "", "", "", err
-	}
-
-	internalPortName := fmt.Sprintf("%s-lrp-int", projectName)
-	internalPortMAC, err := networkRandomMAC()
-	shared.RunCommand("ovn-nbctl", "--if-exists", "lrp-del", internalPortName)
-	_, err = shared.RunCommand("ovn-nbctl", "lrp-add", projectName, internalPortName, internalPortMAC, "10.0.0.1/24")
-	if err != nil {
-		return "", "", "", err
+		return "", err
 	}
 
 	// Add default route.
 	_, err = shared.RunCommand("ovn-nbctl", "lr-route-add", projectName, "0.0.0.0/0", "169.254.1.1")
 	if err != nil {
-		return "", "", "", err
+		return "", err
 	}
 
-	return externalPortName, internalPortName, internalPortMAC, nil
+	return externalPortName, nil
 }
 
 // createProjectExternalSwitch creates external logical switch, connects external router port to it and returns
@@ -337,21 +346,32 @@ func createProjectExternalSwitch(projectName string, externalRouterPort string) 
 
 // createProjectInternalSwitch creates internal logical switch, connects internal router port to it and returns
 // internal switch name and DHCP options ID.
-func createProjectInternalSwitch(projectName string, internalRouterPort string, internalRouterPortMAC string, networkName string) (string, string, error) {
-	cidr := "10.0.0.0/24"
-	routerIP := "10.0.0.1"
+func createProjectInternalSwitch(projectName string, network network) (string, string, error) {
+	// Create router port.
+	internalRouterPortName := fmt.Sprintf("%s-%s-lrp-int", projectName, network.name)
+	internalRouterPortMAC, err := networkRandomMAC()
+	routerIP, cidr, err := net.ParseCIDR(network.gw)
+	if err != nil {
+		return "", "", err
+	}
+
+	shared.RunCommand("ovn-nbctl", "--if-exists", "lrp-del", internalRouterPortName)
+	_, err = shared.RunCommand("ovn-nbctl", "lrp-add", projectName, internalRouterPortName, internalRouterPortMAC, network.gw)
+	if err != nil {
+		return "", "", err
+	}
 
 	// Create internal project switch.
-	internalSwitchName := fmt.Sprintf("%s-%s-ls-int", projectName, networkName)
+	internalSwitchName := fmt.Sprintf("%s-%s-ls-int", projectName, network.name)
 	shared.RunCommand("ovn-nbctl", "--if-exists", "ls-del", internalSwitchName)
-	_, err := shared.RunCommand("ovn-nbctl", "ls-add", internalSwitchName)
+	_, err = shared.RunCommand("ovn-nbctl", "ls-add", internalSwitchName)
 	if err != nil {
 		return "", "", err
 	}
 
 	// Setup DHCP.
 	_, err = shared.RunCommand("ovn-nbctl", "set", "logical_switch", internalSwitchName,
-		fmt.Sprintf("other_config:subnet=%s", cidr),
+		fmt.Sprintf("other_config:subnet=%s", cidr.String()),
 		"other_config:exclude_ips=10.0.0.1..10.0.0.10",
 	)
 	if err != nil {
@@ -374,7 +394,7 @@ func createProjectInternalSwitch(projectName string, internalRouterPort string, 
 		}
 	}
 
-	DHCPv4Opt, err := shared.RunCommand("ovn-nbctl", "create", "dhcp_option", fmt.Sprintf("external_ids:lxd_network=%s", internalSwitchName), fmt.Sprintf("cidr=%s", cidr))
+	DHCPv4Opt, err := shared.RunCommand("ovn-nbctl", "create", "dhcp_option", fmt.Sprintf("external_ids:lxd_network=%s", internalSwitchName), fmt.Sprintf("cidr=%s", cidr.String()))
 	if err != nil {
 		return "", "", err
 	}
@@ -383,8 +403,8 @@ func createProjectInternalSwitch(projectName string, internalRouterPort string, 
 	// We have to use dhcp-options-set-options rather than the command above as its the only way to allow the
 	// domain_name option to be properly escaped.
 	_, err = shared.RunCommand("ovn-nbctl", "dhcp-options-set-options", DHCPv4Opt,
-		fmt.Sprintf("server_id=%s", routerIP),
-		fmt.Sprintf("router=%s", routerIP),
+		fmt.Sprintf("server_id=%s", routerIP.String()),
+		fmt.Sprintf("router=%s", routerIP.String()),
 		fmt.Sprintf("server_mac=%s", internalRouterPortMAC),
 		"lease_time=3600",
 		"dns_server=8.8.8.8",
@@ -395,7 +415,7 @@ func createProjectInternalSwitch(projectName string, internalRouterPort string, 
 	}
 
 	// Create logical switch router port.
-	internalSwitchRouterPortName := fmt.Sprintf("%s-lsrp-int", projectName)
+	internalSwitchRouterPortName := fmt.Sprintf("%s-%s-lsrp-int", projectName, network.name)
 	shared.RunCommand("ovn-nbctl", "--if-exists", "lsp-del", internalSwitchRouterPortName)
 	_, err = shared.RunCommand("ovn-nbctl", "lsp-add", internalSwitchName, internalSwitchRouterPortName)
 	if err != nil {
@@ -413,13 +433,13 @@ func createProjectInternalSwitch(projectName string, internalRouterPort string, 
 		return "", "", err
 	}
 
-	_, err = shared.RunCommand("ovn-nbctl", "lsp-set-options", internalSwitchRouterPortName, fmt.Sprintf("router-port=%s", internalRouterPort))
+	_, err = shared.RunCommand("ovn-nbctl", "lsp-set-options", internalSwitchRouterPortName, fmt.Sprintf("router-port=%s", internalRouterPortName))
 	if err != nil {
 		return "", "", err
 	}
 
 	// Add return route in project external namespace.
-	_, err = shared.RunCommand("ip", "-n", projectName, "route", "add", cidr, "via", "169.254.1.2", "dev", "eth1")
+	_, err = shared.RunCommand("ip", "-n", projectName, "route", "add", cidr.String(), "via", "169.254.1.2", "dev", "eth1")
 	if err != nil {
 		return "", "", err
 	}
@@ -507,7 +527,7 @@ func createInstance(projectName string, instanceName string, instPortName string
 	instName := fmt.Sprintf("%s-%s", projectName, instanceName)
 	shared.RunCommand("lxc", "delete", "-f", instName)
 
-	_, err := shared.RunCommand("lxc", "init", "images:ubuntu/focal", instName)
+	_, err := shared.RunCommand("lxc", "init", "images:alpine/3.11", instName)
 	if err != nil {
 		return err
 	}
