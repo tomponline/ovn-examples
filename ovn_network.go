@@ -159,17 +159,61 @@ func createProjectExternalNamespace(projectName string) (string, error) {
 	hostName := networkRandomDevName("exth")
 	peerName := networkRandomDevName("extp")
 
+	hostAddr := "169.254.0.1"
+	var peerAddr string
+
+	routeStr, err := shared.RunCommand("ip", "route", "show")
+	if err != nil {
+		return "", err
+	}
+
+	routeStr = strings.TrimSpace(routeStr)
+	routes := strings.Split(routeStr, "\n")
+	isUsed := func(routes []string, matchRoute string) bool {
+		for _, route := range routes {
+			parts := strings.Fields(route)
+			if len(parts) < 1 {
+				continue
+			}
+
+			if parts[0] == matchRoute {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	// This places a limit of 253 projects with OVN networks per host.
+	// Could be expanded if needed by using more addresses in 169.254.0.0/16.
+	for i := 2; i < 255; i++ {
+		checkAddr := net.IPv4(169, 254, 0, byte(i))
+		if !isUsed(routes, checkAddr.String()) {
+			peerAddr = checkAddr.String()
+			break
+		}
+	}
+
+	if peerAddr == "" {
+		return "", fmt.Errorf("Unable to find free host-side IP to use")
+	}
+
 	_, err = shared.RunCommand("ip", "link", "add", "dev", hostName, "type", "veth", "peer", "name", peerName)
 	if err != nil {
 		return "", err
 	}
 
-	_, err = shared.RunCommand("ip", "address", "add", "169.254.0.1/30", "dev", hostName)
+	_, err = shared.RunCommand("ip", "address", "add", fmt.Sprintf("%s/32", hostAddr), "dev", hostName)
 	if err != nil {
 		return "", err
 	}
 
 	_, err = shared.RunCommand("ip", "link", "set", "dev", hostName, "up")
+	if err != nil {
+		return "", err
+	}
+
+	_, err = shared.RunCommand("ip", "route", "add", fmt.Sprintf("%s/32", peerAddr), "dev", hostName)
 	if err != nil {
 		return "", err
 	}
@@ -184,12 +228,17 @@ func createProjectExternalNamespace(projectName string) (string, error) {
 		return "", err
 	}
 
-	_, err = shared.RunCommand("ip", "-n", projectName, "address", "add", "169.254.0.2/30", "dev", "eth0")
+	_, err = shared.RunCommand("ip", "-n", projectName, "address", "add", fmt.Sprintf("%s/32", peerAddr), "dev", "eth0")
 	if err != nil {
 		return "", err
 	}
 
-	_, err = shared.RunCommand("ip", "-n", projectName, "route", "add", "default", "via", "169.254.0.1", "dev", "eth0")
+	_, err = shared.RunCommand("ip", "-n", projectName, "route", "add", fmt.Sprintf("%s/32", hostAddr), "dev", "eth0")
+	if err != nil {
+		return "", err
+	}
+
+	_, err = shared.RunCommand("ip", "-n", projectName, "route", "add", "default", "via", hostAddr, "dev", "eth0")
 	if err != nil {
 		return "", err
 	}
