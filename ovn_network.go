@@ -18,9 +18,11 @@ import (
 )
 
 type network struct {
-	name string
-	gwV4 string
-	gwV6 string
+	name  string
+	gwV4  string
+	gwV6  string
+	dnsV4 string
+	dnsV6 string
 }
 
 // Define IPv4 to use on host-side of project namespace veth-pair.
@@ -36,8 +38,6 @@ const extOVNIPv4 = "169.254.1.2"
 const extIPv6ULAPrefix = "fd42::"
 
 // Define DNS settings.
-const dnsV4 = "8.8.8.8"
-const dnsV6 = "2001:4860:4860::8888"
 const dnsDomainName = "lxd"
 const dnsV6SearchDomains = "lxd"
 
@@ -69,14 +69,18 @@ func main() {
 		// Define the networks we want each project to have.
 		networks := []network{
 			network{
-				name: "net1",
-				gwV4: "10.0.0.1/24",
-				gwV6: "fd47:8ac3:9083:35f6::1/64",
+				name:  "net1",
+				gwV4:  "10.0.0.1/24",
+				gwV6:  "fd47:8ac3:9083:35f6::1/64",
+				dnsV4: "10.0.0.53",
+				dnsV6: "fd47:8ac3:9083:35f6::53",
 			},
 			network{
-				name: "net2",
-				gwV4: "192.168.3.1/24",
-				gwV6: "fd47:8ac3:9083:36f6::1/64",
+				name:  "net2",
+				gwV4:  "192.168.3.1/24",
+				gwV6:  "fd47:8ac3:9083:36f6::1/64",
+				dnsV4: "192.168.3.53",
+				dnsV6: "fd47:8ac3:9083:36f6::53",
 			},
 		}
 
@@ -257,7 +261,7 @@ func createProjectExternalNamespace(projectName string) (string, error) {
 		return "", err
 	}
 
-	// Enable EUI64 link-local addresses (addr_gen_mode=0) for routing.
+	// Enable EUI64 link-local addresses (addr_gen_mode=0) for IPv6 neighbour discovery.
 	_, err = shared.RunCommand("sysctl",
 		fmt.Sprintf("net.ipv6.conf.%s.addr_gen_mode=0", hostName),
 		fmt.Sprintf("net.ipv6.conf.%s.autoconf=0", hostName),
@@ -306,7 +310,7 @@ func createProjectExternalNamespace(projectName string) (string, error) {
 		return "", err
 	}
 
-	// Enable EUI64 link-local addresses (addr_gen_mode=0) for routing.
+	// Enable EUI64 link-local addresses (addr_gen_mode=0) for IPv6 neighbour discovery.
 	_, err = shared.RunCommand("ip", "netns", "exec", projectName, "sysctl",
 		fmt.Sprintf("net.ipv6.conf.%s.addr_gen_mode=0", "eth0"),
 		fmt.Sprintf("net.ipv6.conf.%s.autoconf=0", "eth0"),
@@ -368,6 +372,10 @@ func createProjectExternalNamespace(projectName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	// Start dns server listening on all "dns*" interfaces in external namespace.
+	// This is so it can dynamically listen when a network adds its localport dns interface into namespace.
+	// E.g: dnsmasq --interface=dns* --bind-dynamic --no-daemon --no-hosts  --no-resolv --server=8.8.8.8 --except-interface=lo --except-interface=eth0 --except-interface=eth1
 
 	return hostName, nil
 }
@@ -527,7 +535,7 @@ func createProjectRouter(projectName string, chassisName string) error {
 		return err
 	}
 
-	// Enable EUI64 link-local addresses (addr_gen_mode=0) for routing.
+	// Enable EUI64 link-local addresses (addr_gen_mode=0) for IPv6 neighbour discovery.
 	_, err = shared.RunCommand("ip", "netns", "exec", projectName, "sysctl",
 		fmt.Sprintf("net.ipv6.conf.%s.addr_gen_mode=0", "eth1"),
 		fmt.Sprintf("net.ipv6.conf.%s.autoconf=0", "eth1"),
@@ -606,7 +614,7 @@ func createProjectInternalSwitch(projectName string, network network) (string, s
 		"ipv6_ra_configs:address_mode=slaac",
 		"ipv6_ra_configs:min_interval=10",
 		"ipv6_ra_configs:max_interval=15",
-		fmt.Sprintf("ipv6_ra_configs:rdnss=%s", dnsV6),
+		fmt.Sprintf("ipv6_ra_configs:rdnss=%s", network.dnsV6),
 		fmt.Sprintf("ipv6_ra_configs:dnssl=%s", dnsV6SearchDomains),
 	)
 	if err != nil {
@@ -624,7 +632,7 @@ func createProjectInternalSwitch(projectName string, network network) (string, s
 	// Setup DHCP.
 	_, err = shared.RunCommand("ovn-nbctl", "set", "logical_switch", internalSwitchName,
 		fmt.Sprintf("other_config:subnet=%s", cidrV4.String()),
-		"other_config:exclude_ips=10.0.0.1..10.0.0.10",
+		fmt.Sprintf("other_config:exclude_ips=%s %s", routerIPv4, network.dnsV4),
 		fmt.Sprintf("other_config:ipv6_prefix=%s", cidrV6.String()),
 	)
 	if err != nil {
@@ -663,7 +671,7 @@ func createProjectInternalSwitch(projectName string, network network) (string, s
 		fmt.Sprintf("router=%s", routerIPv4.String()),
 		fmt.Sprintf("server_mac=%s", internalRouterPortMAC),
 		"lease_time=3600",
-		fmt.Sprintf("dns_server=%s", dnsV4),
+		fmt.Sprintf("dns_server=%s", network.dnsV4),
 		fmt.Sprintf(`domain_name="%s"`, dnsDomainName),
 	)
 	if err != nil {
@@ -684,7 +692,7 @@ func createProjectInternalSwitch(projectName string, network network) (string, s
 	_, err = shared.RunCommand("ovn-nbctl", "dhcp-options-set-options", DHCPv6Opt,
 		fmt.Sprintf("server_id=%s", internalRouterPortMAC),
 		fmt.Sprintf(`domain_search="%s"`, dnsDomainName),
-		fmt.Sprintf("dns_server=%s", dnsV6),
+		fmt.Sprintf("dns_server=%s", network.gwV6),
 	)
 	if err != nil {
 		return "", "", "", err
@@ -745,6 +753,139 @@ func createProjectInternalSwitch(projectName string, network network) (string, s
 
 	// Add return route in project external namespace.
 	_, err = shared.RunCommand("ip", "-n", projectName, "-6", "route", "add", cidrV6.String(), "via", extOVNAddrV6, "dev", "eth1")
+	if err != nil {
+		return "", "", "", err
+	}
+
+	// Setup internal DNS port on switch.
+	internalSwitchDNSPortName := fmt.Sprintf("%s-%s-lsdns-int", projectName, network.name)
+	shared.RunCommand("ovn-nbctl", "--if-exists", "lsp-del", internalSwitchDNSPortName)
+	_, err = shared.RunCommand("ovn-nbctl", "lsp-add", internalSwitchName, internalSwitchDNSPortName)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	// Specify type as "localport" so that every chassis will have one and traffic won't traverse chassis.
+	_, err = shared.RunCommand("ovn-nbctl", "lsp-set-type", internalSwitchDNSPortName, "localport")
+	if err != nil {
+		return "", "", "", err
+	}
+
+	dnsMAC, err := networkRandomMAC()
+	if err != nil {
+		return "", "", "", err
+	}
+
+	_, err = shared.RunCommand("ovn-nbctl", "lsp-set-addresses", internalSwitchDNSPortName, fmt.Sprintf("%s %s %s", dnsMAC, network.dnsV4, network.dnsV6))
+	if err != nil {
+		return "", "", "", err
+	}
+
+	// Create veth pair to connect DNS port to external namespace.
+	hostName := networkRandomDevName("dnsh")
+	peerName := networkRandomDevName("dnsp")
+
+	_, err = shared.RunCommand("ip", "link", "add", "dev", hostName, "type", "veth", "peer", "name", peerName)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	// No need for auto-generated link-local IPv6 addresses on host interface connected to bridge.
+	_, err = shared.RunCommand("sysctl",
+		fmt.Sprintf("net.ipv6.conf.%s.addr_gen_mode=1", hostName),
+		fmt.Sprintf("net.ipv6.conf.%s.autoconf=0", hostName),
+		fmt.Sprintf("net.ipv6.conf.%s.accept_ra=0", hostName),
+		fmt.Sprintf("net.ipv6.conf.%s.forwarding=0", hostName),
+		fmt.Sprintf("net.ipv4.conf.%s.forwarding=0", hostName),
+	)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	// Connect host port to internalSwitchDNSPortName via integration bridge.
+	_, err = shared.RunCommand("ovs-vsctl", "add-port", "br-int", hostName)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	_, err = shared.RunCommand("ovs-vsctl", "set", "interface", hostName, fmt.Sprintf("external_ids:iface-id=%s", internalSwitchDNSPortName))
+	if err != nil {
+		return "", "", "", err
+	}
+
+	_, err = shared.RunCommand("ip", "link", "set", "dev", hostName, "up")
+	if err != nil {
+		return "", "", "", err
+	}
+
+	// Move peer port into external namespace.
+	_, err = shared.RunCommand("ip", "link", "set", "netns", projectName, peerName)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	// Enable EUI64 link-local addresses (addr_gen_mode=0) for IPv6 neighbour discovery.
+	// Disable forwarding.
+	_, err = shared.RunCommand("ip", "netns", "exec", projectName, "sysctl",
+		fmt.Sprintf("net.ipv6.conf.%s.addr_gen_mode=0", peerName),
+		fmt.Sprintf("net.ipv6.conf.%s.autoconf=0", peerName),
+		fmt.Sprintf("net.ipv6.conf.%s.accept_ra=0", peerName),
+		fmt.Sprintf("net.ipv6.conf.%s.forwarding=0", peerName),
+		fmt.Sprintf("net.ipv4.conf.%s.forwarding=0", peerName),
+	)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	_, err = shared.RunCommand("ip", "-n", projectName, "link", "set", "dev", peerName, "address", dnsMAC, "up")
+	if err != nil {
+		return "", "", "", err
+	}
+
+	_, err = shared.RunCommand("ip", "-n", projectName, "-4", "address", "add", fmt.Sprintf("%s/32", network.dnsV4), "dev", peerName)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	_, err = shared.RunCommand("ip", "-n", projectName, "-6", "address", "add", fmt.Sprintf("%s/128", network.dnsV6), "dev", peerName)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	// The routing table to use for DNS resolver routes.
+	// This routing table is needed because it allows the resolver process to answer queries with source
+	// addresses matching network.dnsV4 and network.dnsV6 and have them routed locally back to the source
+	// network rather than through the logical router. We use a single custom routing table per project that
+	// contains local routes to each project network down the local DNS port.
+	dnsRouteTable := "100"
+
+	_, err = shared.RunCommand("ip", "-n", projectName, "-4", "route", "add", "table", dnsRouteTable, cidrV4.String(), "dev", peerName)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	_, err = shared.RunCommand("ip", "-n", projectName, "-6", "route", "add", "table", dnsRouteTable, cidrV6.String(), "dev", peerName)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	_, err = shared.RunCommand("ip", "-n", projectName, "-4", "rule", "add", "from", cidrV4.String(), "table", dnsRouteTable)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	_, err = shared.RunCommand("ip", "-n", projectName, "-6", "rule", "add", "from", cidrV6.String(), "table", dnsRouteTable)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	// Ensure firewall drops spoofed packets.
+	_, err = shared.RunCommand("ip", "netns", "exec", projectName, "iptables", "-A", "INPUT", "-i", peerName, "!", "-s", cidrV4.String(), "-j", "DROP")
+	if err != nil {
+		return "", "", "", err
+	}
+
+	_, err = shared.RunCommand("ip", "netns", "exec", projectName, "ip6tables", "-A", "INPUT", "-i", peerName, "!", "-s", cidrV6.String(), "-j", "DROP")
 	if err != nil {
 		return "", "", "", err
 	}
