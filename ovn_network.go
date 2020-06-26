@@ -505,11 +505,8 @@ func createProjectRouter(projectName string, chassisName string) error {
 
 	// No need for auto-generated link-local IPv6 addresses on host interface connected to bridge.
 	_, err = shared.RunCommand("sysctl",
-		fmt.Sprintf("net.ipv6.conf.%s.addr_gen_mode=1", hostName),
-		fmt.Sprintf("net.ipv6.conf.%s.autoconf=0", hostName),
-		fmt.Sprintf("net.ipv6.conf.%s.accept_ra=0", hostName),
-		fmt.Sprintf("net.ipv6.conf.%s.forwarding=1", hostName),
-		fmt.Sprintf("net.ipv4.conf.%s.forwarding=1", hostName),
+		fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", hostName),
+		fmt.Sprintf("net.ipv4.conf.%s.forwarding=0", hostName),
 	)
 	if err != nil {
 		return err
@@ -792,10 +789,7 @@ func createProjectInternalSwitch(projectName string, network network) (string, s
 
 	// No need for auto-generated link-local IPv6 addresses on host interface connected to bridge.
 	_, err = shared.RunCommand("sysctl",
-		fmt.Sprintf("net.ipv6.conf.%s.addr_gen_mode=1", hostName),
-		fmt.Sprintf("net.ipv6.conf.%s.autoconf=0", hostName),
-		fmt.Sprintf("net.ipv6.conf.%s.accept_ra=0", hostName),
-		fmt.Sprintf("net.ipv6.conf.%s.forwarding=0", hostName),
+		fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", hostName),
 		fmt.Sprintf("net.ipv4.conf.%s.forwarding=0", hostName),
 	)
 	if err != nil {
@@ -952,10 +946,7 @@ func addInstancePort(projectName string, internalSwitchName string, instanceName
 
 	// No need for auto-generated link-local IPv6 addresses on host interface connected to bridge.
 	_, err = shared.RunCommand("sysctl",
-		fmt.Sprintf("net.ipv6.conf.%s.addr_gen_mode=1", hostName),
-		fmt.Sprintf("net.ipv6.conf.%s.autoconf=0", hostName),
-		fmt.Sprintf("net.ipv6.conf.%s.accept_ra=0", hostName),
-		fmt.Sprintf("net.ipv6.conf.%s.forwarding=0", hostName),
+		fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", hostName),
 		fmt.Sprintf("net.ipv4.conf.%s.forwarding=0", hostName),
 	)
 	if err != nil {
