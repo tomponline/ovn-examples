@@ -25,6 +25,10 @@ type network struct {
 	dnsV6 string
 }
 
+const ndbIP = "10.109.89.242"
+
+const haChassisGroup = "group1"
+
 // Define IPv4 to use on host-side of project namespace veth-pair.
 const extHostIPv4 = "169.254.0.1"
 
@@ -52,7 +56,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	projects := []string{"project1", "project2"}
+	projects := []string{"project1"}
 	for _, projectName := range projects {
 		extHostName, err := createProjectExternalNamespace(projectName)
 		if err != nil {
@@ -60,11 +64,13 @@ func main() {
 		}
 		log.Printf("Created external host veth interface %q linked to netns %q", extHostName, projectName)
 
-		err = createProjectRouter(projectName, chassisName)
+		extNSPortMAC, extNSAddrV6, extOVNAddrV6, err := createProjectRouter(projectName, chassisName)
 		if err != nil {
 			log.Fatal(err)
 		}
 		log.Printf("Created project logical router %q and external switch", projectName)
+
+		err = createNATRouter(projectName, chassisName, extNSPortMAC, extNSAddrV6, extOVNAddrV6)
 
 		// Define the networks we want each project to have.
 		networks := []network{
@@ -75,13 +81,13 @@ func main() {
 				dnsV4: "10.0.0.53",
 				dnsV6: "fd47:8ac3:9083:35f6::53",
 			},
-			network{
+			/*network{
 				name:  "net2",
 				gwV4:  "192.168.3.1/24",
 				gwV6:  "fd47:8ac3:9083:36f6::1/64",
 				dnsV4: "192.168.3.53",
 				dnsV6: "fd47:8ac3:9083:36f6::53",
-			},
+			},*/
 		}
 
 		for _, network := range networks {
@@ -92,7 +98,7 @@ func main() {
 			log.Printf("Created project internal switch %q (DHCP %q) and connected router to it", internalSwitchName, DHCPv4Opt)
 
 			// Create the instances we want to connect to this network.
-			instances := []string{"c1", "c2"}
+			instances := []string{"c1"}
 			for _, instance := range instances {
 				instanceName := fmt.Sprintf("%s-%s", network.name, instance)
 				instPortName, instPortMac, err := addInstancePort(projectName, internalSwitchName, instanceName, DHCPv4Opt, DHCPv6Opt)
@@ -169,13 +175,31 @@ func networkRandomIPv6P2P() (string, string, error) {
 }
 
 func connectOVStoOVN(chassisName string) error {
+	// Get our chassis IP.
+	output, err := shared.RunCommand("ip", "route", "get", "8.8.8.8")
+	if err != nil {
+		return err
+	}
+
+	fields := strings.Fields(output)
+	ip := fields[6]
+
+	ipParts := strings.Split(ip, ".")
+
+	// No --may-exist argument is supported by this command.
+	shared.RunCommand("ovn-nbctl", "ha-chassis-group-add", haChassisGroup)
+	_, err = shared.RunCommand("ovn-nbctl", "ha-chassis-group-add-chassis", haChassisGroup, chassisName, ipParts[3])
+	if err != nil {
+		return err
+	}
+
 	// Connect local machine OVS to local OVN database.
 	// The "." record seems to be a way to specify the first record in this table,
 	// although can't find any docs on this, only numerous examples using this style.
-	_, err := shared.RunCommand("ovs-vsctl", "set", "open_vswitch", ".",
-		"external_ids:ovn-remote=tcp:127.0.0.1:6642",
+	_, err = shared.RunCommand("ovs-vsctl", "set", "open_vswitch", ".",
+		fmt.Sprintf("external_ids:ovn-remote=tcp:%s:6642", ndbIP),
 		"external_ids:ovn-remote-probe-interval=10000",
-		"external_ids:ovn-encap-ip=127.0.0.1",
+		fmt.Sprintf("external_ids:ovn-encap-ip=%s", ip),
 		"external_ids:ovn-encap-type=geneve",
 		fmt.Sprintf("external_ids:system-id=%s", chassisName),
 	)
@@ -384,32 +408,36 @@ func getExternalRouterPortName(projectName string) string {
 	return fmt.Sprintf("%s-lrp-ext", projectName)
 }
 
+func getExternalNSSwitchPortName(projectName string) string {
+	return fmt.Sprintf("%s-lsnsp-ext", projectName)
+}
+
 // createProjectRouter creates logical router and external logical switch, connects router to it, and connects it
 // into the project namespace.
-func createProjectRouter(projectName string, chassisName string) error {
+func createProjectRouter(projectName string, chassisName string) (string, string, string, error) {
 	// Generate project namespace-side IPv6 address.
 	extNSAddrV6, extNSPortMAC, err := networkRandomIPv6P2P()
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 
 	// Generate project router external-side IPv6 address.
 	extOVNAddrV6, extOVNPortMAC, err := networkRandomIPv6P2P()
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 
 	// Create external project router.
 	shared.RunCommand("ovn-nbctl", "--if-exists", "lr-del", projectName)
 	_, err = shared.RunCommand("ovn-nbctl", "lr-add", projectName)
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 
-	_, err = shared.RunCommand("ovn-nbctl", "set", "logical_router", projectName, fmt.Sprintf("options:chassis=%s", chassisName))
+	/*_, err = shared.RunCommand("ovn-nbctl", "set", "logical_router", projectName, fmt.Sprintf("options:chassis=%s", chassisName))
 	if err != nil {
 		return err
-	}
+	}*/
 
 	// Create external router port.
 	externalRouterPortName := getExternalRouterPortName(projectName)
@@ -417,19 +445,31 @@ func createProjectRouter(projectName string, chassisName string) error {
 	shared.RunCommand("ovn-nbctl", "--if-exists", "lrp-del", externalRouterPortName)
 	_, err = shared.RunCommand("ovn-nbctl", "lrp-add", projectName, externalRouterPortName, extOVNPortMAC, fmt.Sprintf("%s/32", extOVNIPv4), fmt.Sprintf("%s/128", extOVNAddrV6))
 	if err != nil {
-		return err
+		return "", "", "", err
+	}
+
+	// Assign external router port chassis group.
+	chassisGroupID, err := shared.RunCommand("ovn-nbctl", "--format=csv", "--no-headings", "--data=bare", "--colum=_uuid", "find", "ha_chassis_group", fmt.Sprintf("name=%s", haChassisGroup))
+	if err != nil {
+		return "", "", "", err
+	}
+
+	chassisGroupID = strings.TrimSpace(chassisGroupID)
+	_, err = shared.RunCommand("ovn-nbctl", "set", "logical_router_port", externalRouterPortName, fmt.Sprintf("ha_chassis_group=%s", chassisGroupID))
+	if err != nil {
+		return "", "", "", err
 	}
 
 	// Add default IPv4 route.
 	_, err = shared.RunCommand("ovn-nbctl", "lr-route-add", projectName, "0.0.0.0/0", extNSOVNIPv4, externalRouterPortName)
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 
 	// Add default IPv6 route.
 	_, err = shared.RunCommand("ovn-nbctl", "lr-route-add", projectName, "::/0", extNSAddrV6, externalRouterPortName)
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 
 	// Create external project switch.
@@ -437,7 +477,7 @@ func createProjectRouter(projectName string, chassisName string) error {
 	shared.RunCommand("ovn-nbctl", "--if-exists", "ls-del", externalSwitchName)
 	_, err = shared.RunCommand("ovn-nbctl", "ls-add", externalSwitchName)
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 
 	// Create logical switch router port.
@@ -445,38 +485,45 @@ func createProjectRouter(projectName string, chassisName string) error {
 	shared.RunCommand("ovn-nbctl", "--if-exists", "lsp-del", externalSwitchRouterPortName)
 	_, err = shared.RunCommand("ovn-nbctl", "lsp-add", externalSwitchName, externalSwitchRouterPortName)
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 
 	// Connect logical router port to switch.
 	_, err = shared.RunCommand("ovn-nbctl", "lsp-set-type", externalSwitchRouterPortName, "router")
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 
 	_, err = shared.RunCommand("ovn-nbctl", "lsp-set-addresses", externalSwitchRouterPortName, "router")
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 
 	_, err = shared.RunCommand("ovn-nbctl", "lsp-set-options", externalSwitchRouterPortName, fmt.Sprintf("router-port=%s", externalRouterPortName))
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 
 	// Create switch port on external switch and move into project network namespace.
-	externalSwitchNSPortName := fmt.Sprintf("%s-lsnsp-ext", projectName)
+	externalSwitchNSPortName := getExternalNSSwitchPortName(projectName)
 
 	shared.RunCommand("ovn-nbctl", "--if-exists", "lsp-del", externalSwitchNSPortName)
 	_, err = shared.RunCommand("ovn-nbctl", "lsp-add", externalSwitchName, externalSwitchNSPortName)
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 
 	_, err = shared.RunCommand("ovn-nbctl", "lsp-set-addresses", externalSwitchNSPortName, fmt.Sprintf("%s %s %s", extNSPortMAC, extNSOVNIPv4, extNSAddrV6))
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
+
+	return extNSPortMAC, extNSAddrV6, extOVNAddrV6, nil
+
+}
+
+func createNATRouter(projectName string, chassisName string, extNSPortMAC string, extNSAddrV6 string, extOVNAddrV6 string) error {
+	externalSwitchNSPortName := getExternalNSSwitchPortName(projectName)
 
 	// Clear existing ports.
 	existingPorts, err := shared.RunCommand("ovs-vsctl", "--format=csv", "--no-headings", "--data=bare", "--colum=name", "find", "interface", fmt.Sprintf("external-ids:iface-id=%s", externalSwitchNSPortName))
