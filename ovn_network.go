@@ -58,6 +58,14 @@ func main() {
 	projects := []string{"project1"}
 	for _, projectName := range projects {
 
+		if mode == "net" || mode == "all" {
+			err = createLogicalRouter(projectName)
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Printf("Created logical router %q", projectName)
+		}
+
 		// Define the networks we want each project to have.
 		networks := []network{
 			network{
@@ -72,15 +80,27 @@ func main() {
 				dns4:         "10.233.203.1",
 				dns6:         "fd42:8944:1883:8bc::1",
 			},
+			/*network{
+				name:         "net2",
+				gw4:          "10.0.1.1/24",
+				gw6:          "fd47:8ac3:9083:35f7::1/64",
+				extBridge:    "lxdbr0",
+				extIP4:       "10.233.203.101/24",
+				extIP6Prefix: "fd42:8944:1883:8bc::/64",
+				extGW4:       "10.233.203.1",
+				extGW6:       "fd42:8944:1883:8bc::1",
+				dns4:         "10.233.203.1",
+				dns6:         "fd42:8944:1883:8bc::1",
+			},*/
 		}
 
 		for _, network := range networks {
 			if mode == "net" || mode == "all" {
-				err = createLogicalRouter(projectName, network)
+				err = createLogicalRouterUplink(projectName, network)
 				if err != nil {
 					log.Fatal(err)
 				}
-				log.Printf("Created logical router and logical external switch for %q", network.name)
+				log.Printf("Created logical router uplink on %q for %q", projectName, network.name)
 
 				err = createProjectInternalSwitch(projectName, network)
 				if err != nil {
@@ -91,18 +111,17 @@ func main() {
 
 			if mode == "instance" || mode == "all" {
 				// Create the instances we want to connect to this network.
-				instanceName := fmt.Sprintf("%s-%s", network.name, instance)
-				instPortName, instPortMac, err := addInstancePort(projectName, network, instanceName)
+				instPortName, instPortMac, err := addInstancePort(projectName, network, instance)
 				if err != nil {
 					log.Fatal(err)
 				}
 				log.Printf("Created instance port %q (%q)", instPortName, instPortMac)
 
-				err = createInstance(projectName, instanceName, instPortName)
+				err = createInstance(projectName, network, instance, instPortName)
 				if err != nil {
 					log.Fatal(err)
 				}
-				log.Printf("Created instance %q using port %q", instanceName, instPortName)
+				log.Printf("Created instance %q using port %q", instance, instPortName)
 
 			}
 		}
@@ -148,11 +167,11 @@ func networkRandomMAC() (string, error) {
 }
 
 func getExternalOVSBridgeName(projectName string, network network) string {
-	return fmt.Sprintf("%s-ext-br", getLogicalRouterName(projectName, network))
+	return fmt.Sprintf("%s-ext-br", getLogicalRouterName(projectName))
 }
 
-func getLogicalRouterName(projectName string, network network) string {
-	return fmt.Sprintf("%s-%s", projectName, network.name)
+func getLogicalRouterName(projectName string) string {
+	return fmt.Sprintf("%s", projectName)
 }
 
 func getLogicalExtSwitchName(projectName string, network network) string {
@@ -169,6 +188,10 @@ func getLogicalExtSwitchParentPortName(projectName string, network network) stri
 
 func getLogicalIntSwitchName(projectName string, network network) string {
 	return fmt.Sprintf("%s-%s-ls-int", projectName, network.name)
+}
+
+func getInstancePortName(projectName string, network network, instanceName string) string {
+	return fmt.Sprintf("%s-%s-ls-inst-%s", projectName, network.name, instanceName)
 }
 
 func clearOVSPort(externalIfaceID string) error {
@@ -236,9 +259,24 @@ func connectOVStoOVN() error {
 	return nil
 }
 
-// createLogicalRouter creates logical router and external logical switch.
+// createLogicalRouter creates logical router for project.
+func createLogicalRouter(projectName string) error {
+	// Create logical router.
+	logicalRouterName := getLogicalRouterName(projectName)
+	ovnNbctl("--if-exists", "lr-del", logicalRouterName)
+	_, err := ovnNbctl("lr-add", logicalRouterName)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// createLogicalRouterUplink creates logical router uplink port and external logical switch.
 // Connects router to OVS integration bridge and connects integration bridge port to parent network bridge.
-func createLogicalRouter(projectName string, network network) error {
+func createLogicalRouterUplink(projectName string, network network) error {
+	logicalRouterName := getLogicalRouterName(projectName)
+
 	// Generate MAC address for logical router's external port.
 	lrpExtMACStr, err := networkRandomMAC()
 	if err != nil {
@@ -274,14 +312,6 @@ func createLogicalRouter(projectName string, network network) error {
 	extIP6Net := net.IPNet{
 		IP:   extIP6,
 		Mask: extNet6.Mask,
-	}
-
-	// Create logical router.
-	logicalRouterName := getLogicalRouterName(projectName, network)
-	ovnNbctl("--if-exists", "lr-del", logicalRouterName)
-	_, err = ovnNbctl("lr-add", logicalRouterName)
-	if err != nil {
-		return err
 	}
 
 	// Create external router port.
@@ -391,67 +421,7 @@ func createLogicalRouter(projectName string, network network) error {
 		return err
 	}
 
-	/*
-
-
-		_, err = ovnNbctl("lsp-set-options", externalSwitchParentPortName, fmt.Sprintf("network_name=%s", "lxdbr0"))
-		if err != nil {
-			return err
-		}
-	*/
-
-	/*
-		// Create veth pair to connect logical external switch to parent bridge.
-		hostName := networkRandomDevName("exth")
-		peerName := networkRandomDevName("extp")
-
-		_, err = shared.RunCommand("ip", "link", "add", "dev", hostName, "type", "veth", "peer", "name", peerName)
-		if err != nil {
-			return err
-		}
-
-		// No need for auto-generated link-local IPv6 addresses on host interface connected to bridge.
-		_, err = shared.RunCommand("sysctl",
-			fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", hostName),
-			fmt.Sprintf("net.ipv4.conf.%s.forwarding=0", hostName),
-		)
-		if err != nil {
-			return err
-		}
-
-		// No need for auto-generated link-local IPv6 addresses on host interface connected to bridge.
-		_, err = shared.RunCommand("sysctl",
-			fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", peerName),
-			fmt.Sprintf("net.ipv4.conf.%s.forwarding=0", peerName),
-		)
-		if err != nil {
-			return err
-		}
-
-		// Connect to parent bridge.
-		_, err = shared.RunCommand("ip", "link", "set", "master", network.extBridge, "up", hostName)
-		if err != nil {
-			return err
-		}
-
-		// Connect to OVS integration bridge.
-		err = clearOVSPort(externalSwitchParentPortName)
-		if err != nil {
-			return err
-		}
-
-		_, err = shared.RunCommand("ovs-vsctl", "add-port", "br-int", peerName)
-		if err != nil {
-			return err
-		}
-
-			_, err = shared.RunCommand("ip", "link", "set", peerName, "up")
-		if err != nil {
-			return err
-		}
-	*/
-
-	_, err = shared.RunCommand("ovs-vsctl", "set", "interface", "veth-lxdbr0-b", fmt.Sprintf("external_ids:iface-id=%s", externalSwitchParentPortName))
+	_, err = ovnNbctl("lsp-set-options", externalSwitchParentPortName, fmt.Sprintf("network_name=%s", "lxdbr0"))
 	if err != nil {
 		return err
 	}
@@ -462,7 +432,7 @@ func createLogicalRouter(projectName string, network network) error {
 // createProjectInternalSwitch creates internal logical switch, connects internal router port to it and returns
 // internal switch name and DHCPv4 and DHCPv6 options ID.
 func createProjectInternalSwitch(projectName string, network network) error {
-	logicalRouterName := getLogicalRouterName(projectName, network)
+	logicalRouterName := getLogicalRouterName(projectName)
 
 	// Create router port.
 	internalRouterPortName := fmt.Sprintf("%s-%s-lrp-int", projectName, network.name)
@@ -508,7 +478,7 @@ func createProjectInternalSwitch(projectName string, network network) error {
 	// Setup DHCP.
 	_, err = ovnNbctl("set", "logical_switch", internalSwitchName,
 		fmt.Sprintf("other_config:subnet=%s", cidrV4.String()),
-		fmt.Sprintf("other_config:exclude_ips=%s %s", routerIPv4, network.dns4),
+		fmt.Sprintf("other_config:exclude_ips=%s", routerIPv4),
 		fmt.Sprintf("other_config:ipv6_prefix=%s", cidrV6.String()),
 	)
 	if err != nil {
@@ -637,7 +607,7 @@ func addInstancePort(projectName string, network network, instanceName string) (
 
 	DHCPv6Opt = strings.TrimSpace(DHCPv6Opt)
 
-	instancePortName := fmt.Sprintf("%s-ls-inst-%s", projectName, instanceName)
+	instancePortName := getInstancePortName(projectName, network, instanceName)
 	ovnNbctl("--if-exists", "lsp-del", instancePortName)
 	_, err = ovnNbctl("lsp-add", internalSwitchName, instancePortName)
 	if err != nil {
@@ -712,8 +682,8 @@ func addInstancePort(projectName string, network network, instanceName string) (
 	return peerName, instancePortMAC, nil
 }
 
-func createInstance(projectName string, instanceName string, instPortName string) error {
-	instName := fmt.Sprintf("%s-%s", projectName, instanceName)
+func createInstance(projectName string, network network, instanceName string, instPortName string) error {
+	instName := fmt.Sprintf("%s-%s-%s", projectName, network.name, instanceName)
 	shared.RunCommand("lxc", "delete", "-f", instName)
 
 	_, err := shared.RunCommand("lxc", "init", "images:alpine/3.12", instName)
