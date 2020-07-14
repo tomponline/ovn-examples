@@ -58,14 +58,6 @@ func main() {
 	projects := []string{"project1"}
 	for _, projectName := range projects {
 
-		if mode == "net" || mode == "all" {
-			err = createLogicalRouter(projectName)
-			if err != nil {
-				log.Fatal(err)
-			}
-			log.Printf("Created logical router %q", projectName)
-		}
-
 		// Define the networks we want each project to have.
 		networks := []network{
 			network{
@@ -80,7 +72,7 @@ func main() {
 				dns4:         "10.233.203.1",
 				dns6:         "fd42:8944:1883:8bc::1",
 			},
-			/*network{
+			network{
 				name:         "net2",
 				gw4:          "10.0.1.1/24",
 				gw6:          "fd47:8ac3:9083:35f7::1/64",
@@ -91,11 +83,17 @@ func main() {
 				extGW6:       "fd42:8944:1883:8bc::1",
 				dns4:         "10.233.203.1",
 				dns6:         "fd42:8944:1883:8bc::1",
-			},*/
+			},
 		}
 
 		for _, network := range networks {
 			if mode == "net" || mode == "all" {
+				err = createLogicalRouter(projectName, network)
+				if err != nil {
+					log.Fatal(err)
+				}
+				log.Printf("Created logical router for project %q and network %q", projectName, network.name)
+
 				err = createLogicalRouterUplink(projectName, network)
 				if err != nil {
 					log.Fatal(err)
@@ -167,11 +165,11 @@ func networkRandomMAC() (string, error) {
 }
 
 func getExternalOVSBridgeName(projectName string, network network) string {
-	return fmt.Sprintf("%s-ext-br", getLogicalRouterName(projectName))
+	return fmt.Sprintf("%s-ext-br", getLogicalRouterName(projectName, network))
 }
 
-func getLogicalRouterName(projectName string) string {
-	return fmt.Sprintf("%s", projectName)
+func getLogicalRouterName(projectName string, network network) string {
+	return fmt.Sprintf("%s-%s", projectName, network.name)
 }
 
 func getLogicalExtSwitchName(projectName string, network network) string {
@@ -259,10 +257,10 @@ func connectOVStoOVN() error {
 	return nil
 }
 
-// createLogicalRouter creates logical router for project.
-func createLogicalRouter(projectName string) error {
+// createLogicalRouter creates logical router for project network.
+func createLogicalRouter(projectName string, network network) error {
 	// Create logical router.
-	logicalRouterName := getLogicalRouterName(projectName)
+	logicalRouterName := getLogicalRouterName(projectName, network)
 	ovnNbctl("--if-exists", "lr-del", logicalRouterName)
 	_, err := ovnNbctl("lr-add", logicalRouterName)
 	if err != nil {
@@ -275,7 +273,7 @@ func createLogicalRouter(projectName string) error {
 // createLogicalRouterUplink creates logical router uplink port and external logical switch.
 // Connects router to OVS integration bridge and connects integration bridge port to parent network bridge.
 func createLogicalRouterUplink(projectName string, network network) error {
-	logicalRouterName := getLogicalRouterName(projectName)
+	logicalRouterName := getLogicalRouterName(projectName, network)
 
 	// Generate MAC address for logical router's external port.
 	lrpExtMACStr, err := networkRandomMAC()
@@ -432,7 +430,7 @@ func createLogicalRouterUplink(projectName string, network network) error {
 // createProjectInternalSwitch creates internal logical switch, connects internal router port to it and returns
 // internal switch name and DHCPv4 and DHCPv6 options ID.
 func createProjectInternalSwitch(projectName string, network network) error {
-	logicalRouterName := getLogicalRouterName(projectName)
+	logicalRouterName := getLogicalRouterName(projectName, network)
 
 	// Create router port.
 	internalRouterPortName := fmt.Sprintf("%s-%s-lrp-int", projectName, network.name)
