@@ -30,4 +30,8 @@ sudo ovn-nbctl --type=switch acl-add "${switchName}" to-lport 1 "outport == \"${
 
 # Port groups.
 sudo ovn-nbctl pg-set-ports testpg lxd-net9-instance-37b963ca-378c-4eca-bbf0-e4cdfcbd62e0-eth0 lxd-net9-instance-9211022a-4df4-4122-9588-525401779289-eth0
-sudo ovn-nbctl --type=switch acl-add "${switchName}" to-lport 2 'inport == @testpg && outport == @testpg && icmp' allow-related # Ping between ports in group
+sudo ovn-nbctl --type=switch acl-add "${switchName}" to-lport 2 "inport == @testpg && outport == @testpg && icmp" allow-related # Ping between ports in group
+
+# Network assigned rules.
+sudo ovn-nbctl --type=switch acl-add "${switchName}" to-lport 2 "outport == \"${routerPort}\" && tcp.dst == {80,443}" allow # HTTP{S} outbound
+sudo ovn-nbctl --type=switch acl-add "${switchName}" to-lport 2 "inport == \"${routerPort}\" && icmp && ip4.dst == 10.0.0.1" allow # Ping to external route NIC IP
