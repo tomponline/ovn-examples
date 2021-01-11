@@ -3,21 +3,30 @@ set -xe
 # Clear all rules for a switch.
 sudo ovn-nbctl clear logical_switch lxd-net9-ls-int acls
 
-# Baseline rules.
+# Baseline switch rules.
+routerPort="lxd-net9-ls-int-lsp-router"
+routerIP4="10.164.241.1"
+routerIP6="fd42:2f0b:37e5:4157::1"
+dnsIP4="10.102.242.1"
+dnsIP6="fd42:442d:225e:59df::1"
+
 sudo ovn-nbctl --type=switch --log acl-add lxd-net9-ls-int to-lport 0 1 drop # Default log and drop
-sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 'arp' allow # ARP
-sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 'nd' allow # Neighbour discovery
-sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 'icmp6.type == 143' allow # Multicast listener report
-sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 'inport == "lxd-net9-ls-int-lsp-router" && nd_ra' allow # Router adverts from router
-sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 'outport == "lxd-net9-ls-int-lsp-router" && nd_rs' allow # Router solicitation to router
-sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 'outport == "lxd-net9-ls-int-lsp-router" && udp.dst == 67' allow # DHCPv4 to router
-sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 'outport == "lxd-net9-ls-int-lsp-router" && udp.dst == 547' allow # DHCPv6 to router
-sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 'outport == "lxd-net9-ls-int-lsp-router" && icmp4.type == 8 && ip4.dst == 10.164.241.1' allow # Ping to router
-sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 'inport == "lxd-net9-ls-int-lsp-router" && icmp4.type == 0 && ip4.src == 10.164.241.1' allow # Ping reply from router
-sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 'outport == "lxd-net9-ls-int-lsp-router" && ip4.dst == 10.102.242.1 && udp.dst == 53' allow # DNS IPv4 UDP
-sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 'outport == "lxd-net9-ls-int-lsp-router" && ip4.dst == 10.102.242.1 && tcp.dst == 53' allow # DNS IPv4 TCP
-sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 'outport == "lxd-net9-ls-int-lsp-router" && ip6.dst == fd42:442d:225e:59df::1 && udp.dst == 53' allow # DNS IPv6 UDP
-sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 'outport == "lxd-net9-ls-int-lsp-router" && ip6.dst == fd42:442d:225e:59df::1 && tcp.dst == 53' allow # DNS IPv6 TCP
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "arp" allow # ARP
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "nd" allow # Neighbour discovery
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "icmp6.type == 143" allow # Multicast listener report
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "inport == \"${routerPort}\" && nd_ra" allow # Router adverts from router
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "outport == \"${routerPort}\" && nd_rs" allow # Router solicitation to router
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "outport == \"${routerPort}\" && udp.dst == 67" allow # DHCPv4 to router
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "outport == \"${routerPort}\" && udp.dst == 547" allow # DHCPv6 to router
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "outport == \"${routerPort}\" && icmp4.type == 8 && ip4.dst == ${routerIP4}" allow # Ping to router IP4
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "inport == \"${routerPort}\" && icmp4.type == 0 && ip4.src == ${routerIP4}" allow # Ping reply from router IP4
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "outport == \"${routerPort}\" && icmp6.type == 128 && ip6.dst == ${routerIP6}" allow # Ping to router IP6
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "inport == \"${routerPort}\" && icmp6.type == 129 && ip6.src == ${routerIP6}" allow # Ping reply from router IP6
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "outport == \"${routerPort}\" && ip4.dst == ${dnsIP4} && udp.dst == 53" allow # DNS IPv4 UDP
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "outport == \"${routerPort}\" && ip4.dst == ${dnsIP4} && tcp.dst == 53" allow # DNS IPv4 TCP
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "outport == \"${routerPort}\" && ip6.dst == ${dnsIP6} && udp.dst == 53" allow # DNS IPv6 UDP
+sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 1 "outport == \"${routerPort}\" && ip6.dst == ${dnsIP6} && tcp.dst == 53" allow # DNS IPv6 TCP
 
 # Port groups.
+sudo ovn-nbctl pg-set-ports testpg lxd-net9-instance-37b963ca-378c-4eca-bbf0-e4cdfcbd62e0-eth0 lxd-net9-instance-9211022a-4df4-4122-9588-525401779289-eth0
 sudo ovn-nbctl --type=switch acl-add lxd-net9-ls-int to-lport 2 'inport == @testpg && outport == @testpg && icmp' allow-related # Ping between ports in group
