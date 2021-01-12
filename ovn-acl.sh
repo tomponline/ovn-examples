@@ -10,6 +10,23 @@ dnsIP6="fd42:442d:225e:59df::1"
 # Clear all rules for a switch.
 sudo ovn-nbctl clear logical_switch "${switchName}" acls
 
+# Delete port groups.
+sudo ovn-nbctl --if-exists destroy port_group myrouters
+sudo ovn-nbctl --if-exists destroy port_group mynicsping
+sudo ovn-nbctl --if-exists destroy port_group mynicspinggoogle
+
+# Setup NIC ping port group.
+sudo ovn-nbctl pg-add mynicsping
+sudo ovn-nbctl pg-set-ports mynicsping lxd-net9-instance-37b963ca-378c-4eca-bbf0-e4cdfcbd62e0-eth0 lxd-net9-instance-9211022a-4df4-4122-9588-525401779289-eth0
+
+# Setup NIC ping 8.8.8.8 port group.
+sudo ovn-nbctl pg-add mynicspinggoogle
+sudo ovn-nbctl pg-set-ports mynicspinggoogle lxd-net9-instance-37b963ca-378c-4eca-bbf0-e4cdfcbd62e0-eth0 lxd-net9-instance-9211022a-4df4-4122-9588-525401779289-eth0
+
+# Setup router port group.
+sudo ovn-nbctl pg-add myrouters
+sudo ovn-nbctl pg-set-ports myrouters "${routerPort}"
+
 # Baseline switch rules.
 sudo ovn-nbctl --type=switch --log acl-add "${switchName}" to-lport 0 1 drop # Default log and drop
 sudo ovn-nbctl --type=switch acl-add "${switchName}" to-lport 1 "arp" allow # ARP
@@ -28,10 +45,10 @@ sudo ovn-nbctl --type=switch acl-add "${switchName}" to-lport 1 "outport == \"${
 sudo ovn-nbctl --type=switch acl-add "${switchName}" to-lport 1 "outport == \"${routerPort}\" && ip6.dst == ${dnsIP6} && udp.dst == 53" allow # DNS IPv6 UDP
 sudo ovn-nbctl --type=switch acl-add "${switchName}" to-lport 1 "outport == \"${routerPort}\" && ip6.dst == ${dnsIP6} && tcp.dst == 53" allow # DNS IPv6 TCP
 
-# Port groups.
-sudo ovn-nbctl pg-set-ports testpg lxd-net9-instance-37b963ca-378c-4eca-bbf0-e4cdfcbd62e0-eth0 lxd-net9-instance-9211022a-4df4-4122-9588-525401779289-eth0
-sudo ovn-nbctl --type=switch acl-add "${switchName}" to-lport 2 "inport == @testpg && outport == @testpg && icmp" allow-related # Ping between ports in group
+# NIC port group rules.
+sudo ovn-nbctl --type=port-group acl-add mynicsping to-lport 2 "inport == @mynicsping && outport == @mynicsping && icmp" allow-related # Ping between ports in group
+sudo ovn-nbctl --type=port-group acl-add mynicspinggoogle to-lport 2 "inport == @mynicspinggoogle && icmp && ip4.dst == 8.8.8.8" allow-related # Ping google from ports in group
 
-# Network assigned rules.
-sudo ovn-nbctl --type=switch acl-add "${switchName}" to-lport 2 "outport == \"${routerPort}\" && tcp.dst == {80,443}" allow # HTTP{S} outbound
-sudo ovn-nbctl --type=switch acl-add "${switchName}" to-lport 2 "inport == \"${routerPort}\" && icmp && ip4.dst == 10.0.0.1" allow # Ping to external route NIC IP
+# Router port group rules.
+sudo ovn-nbctl --type=port-group acl-add myrouters to-lport 2 "outport == @myrouters && tcp.dst == {80,443}" allow # HTTP{S} outbound
+sudo ovn-nbctl --type=port-group acl-add myrouters to-lport 2 "inport == @myrouters && icmp && ip4.dst == 10.0.0.1" allow # Ping to external route NIC IP
